@@ -1,0 +1,264 @@
+# Measured gap: a servlet method that hands its HttpServletRequest to a
+# small wrapper/facade object and then reads a parameter/header/cookie off
+# *that* object instead of calling request.getParameter/getHeader/getCookie
+# directly. Every vendored taint-mode rule here (no-direct-response-writer,
+# tainted-sql-from-http-request, tainted-cmd-from-http-request,
+# httpservlet-path-traversal, tainted-session-from-http-request) requires
+# its pattern-sources to match `(HttpServletRequest $REQ).$REQFUNC(...)`
+# directly, so a wrapper class breaks the match even though the data is
+# exactly as tainted one hop later.
+#
+# Measured against a 351-case stratified sample of OWASP Benchmark (Java)
+# scanned for sast-web's login-page benchmark table: of the 22 true
+# positives Semgrep produced zero candidates for, 10 used this exact shape
+# -- OWASP-Benchmark/BenchmarkJava's own SeparateClassRequest helper
+# (src/main/java/org/owasp/benchmark/helpers/SeparateClassRequest.java)
+# wraps HttpServletRequest and exposes getTheParameter/getTheCookie as
+# pass-throughs. That class is Benchmark-specific, but the *shape* --
+# `new SomeRequestHelper(request)` then `helper.getSomething(...)` -- is an
+# ordinary real-world pattern (a request-context/facade object), not
+# something specific to this one test suite, which is why this is scoped by
+# shape and getter-name rather than by that one class name. Verified with
+# `semgrep --config` against the actual sampled corpus both ways: the 10
+# previously-uncovered true cases now produce a candidate, and running the
+# same rule over the sample's 53 safe (ground-truth-false) cases that also
+# use this wrapper produces exactly 5 new candidates -- each one checked by
+# hand to confirm the wrapper genuinely carries a real parameter through to
+# a sink (see wrapped-request-parameter-source.java's own commentary), i.e.
+# the rule is correctly surfacing a real candidate for the LLM verify stage
+# to judge safe, not mismatching syntax it shouldn't.
+#
+# Getter-name scope: SeparateClassRequest also exposes getTheValue(), a
+# deliberate decoy that returns a hardcoded constant and does not touch the
+# request at all -- Benchmark's own way of testing whether a tool
+# distinguishes a real pass-through from a same-shaped safe method. Real
+# interfile dataflow analysis (resolving into the wrapper's own method body
+# to see whether it touches the request) is a Semgrep Pro capability this
+# project does not use (see the vendored rules' unused `interfile: true`
+# option, which is a no-op on the OSS engine actually installed --
+# semgrep==1.173.0 per requirements.txt). Absent that, the getter's *name*
+# is the only signal available, so this only fires on names that plainly
+# describe a parameter/header/cookie/query read (getParameter, getHeader,
+# getCookie, getQueryString, and this project's own getThe- prefix variant)
+# and deliberately stays off generic names like getTheValue/getValue/getData
+# a real facade might use for something unrelated to the request.
+#
+# Plain taint-mode rules, matching every other rule in this file: Semgrep's
+# job is to surface a candidate, not prove reachability -- the LLM verify
+# stage does that (docs/framework.md sections 3-4). Being over-inclusive on
+# the getter-name heuristic is an explicit tradeoff, same as every other
+# rule here (see command-injection.yml's own note on this).
+#
+# One pattern-sources block, repeated per sink family below because Semgrep
+# taint-mode rules cannot import a shared sources block from another rule --
+# each vendored taint rule this project relies on already does the same
+# per-rule duplication of its own sink-specific concerns.
+#
+# What this deliberately does NOT cover, measured on the same corpus and
+# left for a separate pass rather than guessed at: (1) a source built by
+# enumerating request.getParameterNames() and using the *name* the loop
+# lands on, rather than calling a getter at all -- a different shape, not
+# this rule's "wrapper object" pattern; (2) Spring JdbcTemplate methods
+# (execute/queryForMap/query/...) as SQL sinks, a sink family of its own;
+# (3) taint reaching a sink through a long chain of generic-container calls
+# (StringBuilder/HashMap put-then-get) between source and sink, which needs
+# propagator rules of its own and risks real noise if added without the
+# same per-shape verification this rule got.
+rules:
+  - id: wrapped-request-param-into-response-writer
+    languages: [java]
+    severity: WARNING
+    message: >
+      A parameter/header/cookie value is read through a wrapper object
+      constructed from the HttpServletRequest, then written to the HTTP
+      response writer/output stream. If the wrapper is a genuine
+      pass-through to the request (as opposed to a same-shaped method that
+      does not touch it), this is unescaped reflected input and a
+      cross-site scripting risk.
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp:
+        - "A03:2021 - Injection"
+      source: sast-local/rules/custom
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              $METHOD(..., $REQTYPE $REQ, ...) { ... }
+          - metavariable-regex:
+              metavariable: $REQTYPE
+              regex: ^(HttpServletRequest|ServletRequest)$
+          - pattern-inside: |
+              $WRAPCLS $SCR = new $WRAPCLS($REQ);
+              ...
+          - pattern: $SCR.$GETTER(...)
+          - metavariable-regex:
+              metavariable: $GETTER
+              regex: (?i)^get(the)?(parameter|header|cookie|querystring)s?$
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: (HttpServletResponse $RESPONSE).getWriter(...).$WRITE(...)
+              - pattern: (HttpServletResponse $RESPONSE).getOutputStream(...).$WRITE(...)
+              - pattern: (java.io.PrintWriter $WRITER).$WRITE(...)
+              - pattern: (PrintWriter $WRITER).$WRITE(...)
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: Encode.forHtml(...)
+          - pattern: org.apache.commons.lang.StringEscapeUtils.escapeHtml(...)
+          - pattern: org.springframework.web.util.HtmlUtils.htmlEscape(...)
+          - pattern: org.owasp.esapi.ESAPI.encoder().encodeForHTML(...)
+
+  - id: wrapped-request-param-into-sql
+    languages: [java]
+    severity: ERROR
+    message: >
+      A parameter/header/cookie value is read through a wrapper object
+      constructed from the HttpServletRequest, then reaches a SQL
+      statement. If the wrapper is a genuine pass-through to the request,
+      this is unparameterized untrusted input reaching the database.
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+      source: sast-local/rules/custom
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              $METHOD(..., $REQTYPE $REQ, ...) { ... }
+          - metavariable-regex:
+              metavariable: $REQTYPE
+              regex: ^(HttpServletRequest|ServletRequest)$
+          - pattern-inside: |
+              $WRAPCLS $SCR = new $WRAPCLS($REQ);
+              ...
+          - pattern: $SCR.$GETTER(...)
+          - metavariable-regex:
+              metavariable: $GETTER
+              regex: (?i)^get(the)?(parameter|header|cookie|querystring)s?$
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - patterns:
+                  - pattern-either:
+                      - pattern: (java.sql.Statement $STMT).$EXEC(...)
+                      - pattern: (Statement $STMT).$EXEC(...)
+                  - metavariable-regex:
+                      metavariable: $EXEC
+                      regex: ^(execute|executeQuery|executeUpdate)$
+              - pattern: $CONN.prepareStatement($SQL, ...)
+              - pattern: $CONN.prepareCall($SQL, ...)
+    pattern-sanitizers:
+      - patterns:
+          - pattern-either:
+              - pattern: $CONN.prepareStatement("...", ...)
+              - pattern: $CONN.prepareCall("...", ...)
+
+  - id: wrapped-request-param-into-exec
+    languages: [java]
+    severity: ERROR
+    message: >
+      A parameter/header/cookie value is read through a wrapper object
+      constructed from the HttpServletRequest, then reaches process
+      execution. If the wrapper is a genuine pass-through to the request,
+      this is untrusted input reaching a spawned command.
+    metadata:
+      cwe:
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+      source: sast-local/rules/custom
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              $METHOD(..., $REQTYPE $REQ, ...) { ... }
+          - metavariable-regex:
+              metavariable: $REQTYPE
+              regex: ^(HttpServletRequest|ServletRequest)$
+          - pattern-inside: |
+              $WRAPCLS $SCR = new $WRAPCLS($REQ);
+              ...
+          - pattern: $SCR.$GETTER(...)
+          - metavariable-regex:
+              metavariable: $GETTER
+              regex: (?i)^get(the)?(parameter|header|cookie|querystring)s?$
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $R.exec(...)
+              - pattern: new ProcessBuilder(...).start()
+
+  - id: wrapped-request-param-into-file-path
+    languages: [java]
+    severity: ERROR
+    message: >
+      A parameter/header/cookie value is read through a wrapper object
+      constructed from the HttpServletRequest, then used to build a file
+      path. If the wrapper is a genuine pass-through to the request, this is
+      untrusted input reaching filesystem access -- a path traversal risk.
+    metadata:
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp:
+        - "A01:2021 - Broken Access Control"
+      source: sast-local/rules/custom
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              $METHOD(..., $REQTYPE $REQ, ...) { ... }
+          - metavariable-regex:
+              metavariable: $REQTYPE
+              regex: ^(HttpServletRequest|ServletRequest)$
+          - pattern-inside: |
+              $WRAPCLS $SCR = new $WRAPCLS($REQ);
+              ...
+          - pattern: $SCR.$GETTER(...)
+          - metavariable-regex:
+              metavariable: $GETTER
+              regex: (?i)^get(the)?(parameter|header|cookie|querystring)s?$
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: new File(...)
+              - pattern: new FileInputStream(...)
+              - pattern: new FileOutputStream(...)
+              - pattern: java.nio.file.Paths.get(...)
+
+  - id: wrapped-request-param-into-session-attribute
+    languages: [java]
+    severity: WARNING
+    message: >
+      A parameter/header/cookie value is read through a wrapper object
+      constructed from the HttpServletRequest, then used as an HTTP session
+      attribute key or value. If the wrapper is a genuine pass-through to
+      the request, untrusted input is crossing into session state without
+      validation -- a trust boundary violation.
+    metadata:
+      cwe:
+        - "CWE-501: Trust Boundary Violation"
+      owasp:
+        - "A04:2021 - Insecure Design"
+      source: sast-local/rules/custom
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              $METHOD(..., $REQTYPE $REQ, ...) { ... }
+          - metavariable-regex:
+              metavariable: $REQTYPE
+              regex: ^(HttpServletRequest|ServletRequest)$
+          - pattern-inside: |
+              $WRAPCLS $SCR = new $WRAPCLS($REQ);
+              ...
+          - pattern: $SCR.$GETTER(...)
+          - metavariable-regex:
+              metavariable: $GETTER
+              regex: (?i)^get(the)?(parameter|header|cookie|querystring)s?$
+    pattern-sinks:
+      - patterns:
+          - pattern: $ANY.getSession(...).setAttribute(...)
