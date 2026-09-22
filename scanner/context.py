@@ -311,8 +311,30 @@ def build_callee_context(target: Path, candidate: dict, index) -> str:
         # some unrelated class's toString() as "the method called on the way
         # to the sink" states something false. PasswordResetVulnerability
         # :333 pulled in three unrelated toString() bodies this way.
+        #
+        # One narrowing before giving up: prefer a match declared in the
+        # caller's own file. A private helper with a generic name
+        # (doSomething, process, handle) that every file in a project
+        # redeclares is not actually ambiguous -- Java resolves `new
+        # Test().doSomething(...)` to *this* file's Test at compile time,
+        # every time, because target_owner isn't tracked for Java calls
+        # (unlike C++, see model.py's Call.target_owner) to tell them apart
+        # by type. Same-file is the cheap proxy that recovers the same
+        # answer without it. Measured on a 351-case OWASP Benchmark sample:
+        # 230 of 351 files (65%) declare their own same-named/same-arity
+        # private inner helper, so this was not a rare edge case -- it was
+        # silently dropping the one piece of context (does the helper
+        # actually forward the tainted value, or substitute a hardcoded
+        # constant, per that Benchmark's own decoy convention) the verify
+        # stage needed most, on the majority of candidates in the sample.
+        # If the caller's own file still doesn't narrow it to exactly one,
+        # this falls back to the original conservative drop.
         if len(matches) != 1:
-            continue
+            same_file = [m for m in matches if m.file == method.file]
+            if len(same_file) == 1:
+                matches = same_file
+            else:
+                continue
         callee = matches[0]
         key = (callee.file, callee.name, callee.arity, callee.start_line)
         if key in seen or key == here:

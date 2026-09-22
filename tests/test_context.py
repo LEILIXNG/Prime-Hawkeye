@@ -231,6 +231,47 @@ class TestCalleeContext:
         assert "called-after-the-sink-marker" not in block
         assert "neverReached()" not in block
 
+    def test_prefers_the_callers_own_file_when_the_name_is_ambiguous(self, tmp_path):
+        """A private helper with a generic name that many files in the same
+        project redeclare is not actually ambiguous: Java resolves `new
+        Test().doSomething(...)` to the caller's own file's declaration at
+        compile time, every time. OWASP Benchmark's own per-file
+        `Test.doSomething` idiom is exactly this, at scale -- 230 of 351
+        files in one sampled corpus redeclare the identical
+        name+arity. Without preferring the caller's own file first, the
+        ambiguous-name drop below silently hid the one piece of context
+        (does this file's helper forward the tainted value, or substitute a
+        hardcoded constant) that would have told the verify stage which."""
+        handler = (
+            "class Handler {\n"
+            "    @GetMapping(\"/read\")\n"
+            "    public String handle(String tool) {\n"
+            "        String cleaned = process(tool);\n"
+            "        return root.resolve(cleaned).toString();\n"
+            "    }\n"
+            "    static String process(String value) {\n"
+            "        return value.replaceAll(\"[^a-z0-9_-]\", \"\");\n"
+            "    }\n"
+            "}\n"
+        )
+        other = (
+            "class Other {\n"
+            "    static String process(String value) {\n"
+            "        return \"unrelated-\" + value;\n"
+            "    }\n"
+            "}\n"
+        )
+        root = workspace(tmp_path, {"Handler.java": handler, "Other.java": other})
+        sink_line = handler.splitlines().index("        return root.resolve(cleaned).toString();") + 1
+        candidate = {"sink_file": "Handler.java", "sink_line": sink_line,
+                     "source_file": "Handler.java", "source_line": sink_line}
+
+        block = build_callee_context(root, candidate, index_workspace(root))
+
+        assert "process()" in block
+        assert "[^a-z0-9_-]" in block, "resolved to Handler's own process(), not Other's"
+        assert "unrelated-" not in block
+
     def test_says_how_many_it_left_out(self, tmp_path):
         many = "\n".join(f"    static String helper{i}(String v) {{ return v; }}" for i in range(6))
         calls = " + ".join(f"helper{i}(tool)" for i in range(6))
