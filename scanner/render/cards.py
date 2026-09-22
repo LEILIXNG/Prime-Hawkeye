@@ -56,9 +56,13 @@ def _bilingual(finding: dict, field: str) -> str:
     the stage is optional and the reader should not be able to tell it was
     skipped except by the language not changing.
     """
-    original = finding.get(field) or ""
-    zh = finding.get(f"{field}_zh") or original
-    en = finding.get(f"{field}_en") or original
+    # LLM free-text fields are usually strings, but some providers have been
+    # seen putting a bare number in one instead of the expected prose (see
+    # scanner/render/verdicts.py's verifier_failed check for the same class
+    # of bug) -- str() here keeps html.escape() from crashing on that.
+    original = str(finding.get(field) or "")
+    zh = str(finding.get(f"{field}_zh") or original)
+    en = str(finding.get(f"{field}_en") or original)
     if not original:
         return ""
     return (f'<span data-text-zh="{html.escape(zh)}" data-text-en="{html.escape(en)}">'

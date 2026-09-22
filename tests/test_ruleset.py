@@ -58,7 +58,7 @@ def custom_rule_files():
 # follows the rule's target language rather than being assumed: the MyBatis
 # rule matches mapper XML, so hard-coding .java would have silently reported
 # it as having no fixture.
-FIXTURE_SUFFIXES = (".java", ".xml", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h", ".py", ".rs", ".kt")
+FIXTURE_SUFFIXES = (".java", ".xml", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".h", ".py", ".rs", ".kt", ".cs")
 
 
 def fixture_for(rule_path):

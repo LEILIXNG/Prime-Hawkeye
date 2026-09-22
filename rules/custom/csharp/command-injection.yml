@@ -1,0 +1,31 @@
+# Fills a measured gap in the vendored os-command-injection rule
+# (rules/vendor/semgrep-rules/csharp/lang/security/injections/os-command.yaml):
+# its patterns are `Process.Start($ARG, ...)` (2+ arguments, or the
+# ProcessStartInfo/Process-object forms) -- the `, ...` after $ARG requires
+# at least one more argument, so it structurally never matches the
+# single-string overload `Process.Start($ARG)`, which just hands the whole
+# command line to the shell in one go. That's not a Juliet-specific
+# artifact: it's one of the two normal ways to call Process.Start in real
+# .NET code. Measured against NIST's Juliet C# CWE78_OS_Command_Injection
+# "_Web_" flow variants (see sast-web/eval/build_juliet_csharp_subset.py):
+# 0 candidates from this CWE before this rule existed.
+#
+# This is a plain pattern rule, not `mode: taint`, matching this project's
+# other non-C++ custom rules (see rules/custom/java/command-injection.yml's
+# own docstring): the job here is to surface a candidate, not prove
+# reachability -- that's the call graph + LLM verify stages' job.
+rules:
+  - id: process-start-single-argument
+    languages: [csharp]
+    severity: ERROR
+    message: Process.Start receives a single command-line string built from a non-constant value, which can allow OS command injection.
+    metadata:
+      cwe: ["CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"]
+      owasp: ["A03:2021 - Injection"]
+      source: sast-local/rules/custom
+    patterns:
+      - pattern: Process.Start($ARG)
+      - metavariable-pattern:
+          metavariable: $ARG
+          patterns:
+            - pattern-not: "\"...\""

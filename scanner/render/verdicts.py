@@ -51,7 +51,7 @@ def verdict_of(item: dict) -> str:
     finding = item.get("finding") or {}
     if not finding:
         return "unverified"
-    if "verifier_failed" in (finding.get("reasoning") or ""):
+    if "verifier_failed" in str(finding.get("reasoning") or ""):
         return "failed"
     reachable = finding.get("reachable")
     return reachable if reachable in ("yes", "no") else "uncertain"

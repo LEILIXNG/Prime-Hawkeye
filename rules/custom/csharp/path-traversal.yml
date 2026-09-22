@@ -1,0 +1,36 @@
+# Fills a measured gap in the vendored unsafe-path-combine rule
+# (rules/vendor/semgrep-rules/csharp/lang/security/filesystem/unsafe-path-combine.yaml):
+# its taint source requires Path.Combine(...) specifically, and its sink
+# requires a File.Read*/Write* static method call -- Juliet's actual shape
+# (and a very common real one) is plain string concatenation for the path
+# (`root + data`, no Path.Combine at all) opened via a stream *constructor*
+# (`new StreamReader(...)`), which the vendored rule's sink pattern doesn't
+# cover either. Measured against NIST's Juliet C# CWE23/CWE36 (relative/
+# absolute path traversal) "_Web_" flow variants: 0 candidates from either
+# CWE before this rule existed.
+#
+# Plain pattern rule -- see command-injection.yml in this same directory
+# for why (surface the candidate, let the call graph + LLM verify stages
+# decide reachability).
+rules:
+  - id: file-open-with-nonconstant-path
+    languages: [csharp]
+    severity: ERROR
+    message: A file is opened using a path built from a non-constant value, which can allow path traversal.
+    metadata:
+      cwe: ["CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"]
+      owasp: ["A01:2021 - Broken Access Control"]
+      source: sast-local/rules/custom
+    patterns:
+      - pattern-either:
+          - pattern: new StreamReader($ARG)
+          - pattern: new StreamWriter($ARG)
+          - pattern: new FileStream($ARG, ...)
+          - pattern: File.OpenRead($ARG)
+          - pattern: File.OpenWrite($ARG)
+          - pattern: File.ReadAllText($ARG)
+          - pattern: File.WriteAllText($ARG, ...)
+      - metavariable-pattern:
+          metavariable: $ARG
+          patterns:
+            - pattern-not: "\"...\""

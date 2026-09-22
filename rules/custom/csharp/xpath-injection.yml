@@ -1,0 +1,35 @@
+# Fills a measured gap in the vendored xpath-injection rule
+# (rules/vendor/semgrep-rules/csharp/dotnet/security/audit/xpath-injection.yaml):
+# its `mode: taint` sink patterns require the query to be built *inline* at
+# the call site (`$NAV.Evaluate("..." + $INPUT + "...")`), so a query
+# assembled into a local variable first and passed by name -- the far more
+# common shape, and what Juliet actually does -- never matches. Semgrep's
+# taint engine already tracks a tainted local through assignments; the
+# vendored rule's sink pattern just never gives it the chance to, by
+# requiring the concatenation and the call to be the same expression.
+#
+# This one uses a plain (non-inline-shape) pattern instead of trying to
+# out-taint-mode the vendored rule -- matching this project's other non-C++
+# custom rules (see command-injection.yml in this same directory): surface
+# the candidate broadly, let the call graph + LLM verify stages decide
+# reachability. Measured against NIST's Juliet C# CWE643_Xpath_Injection
+# "_Web_" flow variants: 0 candidates from this CWE before this rule existed.
+rules:
+  - id: xpath-query-with-nonconstant-argument
+    languages: [csharp]
+    severity: ERROR
+    message: An XPath query is evaluated from a non-constant string, which can allow XPath injection.
+    metadata:
+      cwe: ["CWE-643: Improper Neutralization of Data within XPath Expressions ('XPath Injection')"]
+      owasp: ["A03:2021 - Injection"]
+      source: sast-local/rules/custom
+    patterns:
+      - pattern-either:
+          - pattern: $NAV.Evaluate($ARG)
+          - pattern: $NAV.Compile($ARG)
+          - pattern: $NAV.Select($ARG)
+          - pattern: $NAV.SelectSingleNode($ARG)
+      - metavariable-pattern:
+          metavariable: $ARG
+          patterns:
+            - pattern-not: "\"...\""

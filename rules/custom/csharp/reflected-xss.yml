@@ -1,0 +1,28 @@
+# No vendored csharp rule covers reflected XSS via HttpResponse.Write at
+# all (checked rules/vendor/semgrep-rules/csharp/{lang,dotnet,razor}/security --
+# csharp/razor/security's html-raw-json rule is Razor-template-specific and
+# doesn't apply to a plain Web Forms/HttpResponse-style Write() call).
+# Measured against NIST's Juliet C# CWE80_XSS "_Web_" flow variants (see
+# sast-web/eval/build_juliet_csharp_subset.py): effectively zero candidates
+# from this CWE before this rule existed.
+#
+# Plain pattern rule, not `mode: taint` -- see command-injection.yml's
+# docstring in this same directory for why.
+rules:
+  - id: response-write-unencoded
+    languages: [csharp]
+    severity: ERROR
+    message: Data is written directly to the HTTP response without encoding, which can allow cross-site scripting.
+    metadata:
+      cwe: ["CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"]
+      owasp: ["A03:2021 - Injection"]
+      source: sast-local/rules/custom
+    patterns:
+      - pattern: $RESP.Write($ARG)
+      - metavariable-regex:
+          metavariable: $RESP
+          regex: "(?i)^(resp|response)$"
+      - metavariable-pattern:
+          metavariable: $ARG
+          patterns:
+            - pattern-not: "\"...\""

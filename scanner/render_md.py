@@ -24,7 +24,10 @@ def _t(lang: str, path: str) -> str:
 def _prose(finding: dict, field: str, lang: str) -> str:
     """One LLM free-text field in the requested language, falling back to the
     original when 04_translate.py never ran for this report."""
-    return (finding.get(f"{field}_{lang}") or finding.get(field) or "").strip()
+    # str() guards the same way scanner/render/cards.py's _bilingual does --
+    # some providers have been seen putting a bare number in a field the
+    # rest of this pipeline assumes is always prose.
+    return str(finding.get(f"{field}_{lang}") or finding.get(field) or "").strip()
 
 
 def _one_line(text: str) -> str:

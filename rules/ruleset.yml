@@ -122,19 +122,31 @@
 # sqli, ssrf and xxe subdirectories -- one directory config here sweeps up
 # every rule file semgrep finds underneath it, the same way the single
 # java/lang/security entry above already pulls in that language's own
-# nested audit/ subdirectory) carries genuine source -> sink coverage this
-# project has no custom-rule gap for yet: os-command-injection, csharp-sqli,
-# ssrf, three xxe rules, unsafe-path-combine (path traversal), ten separate
-# insecure-deserialization rules (BinaryFormatter, NetDataContract,
-# LosFormatter, SoapFormatter, JavaScriptSerializer, Json.NET TypeNameHandling
-# and others), ldap-injection and xpath-injection, mass-assignment and
-# missing-or-broken-authorization. csharp/dotnet/security (ASP.NET-specific:
-# missing anti-forgery tokens, debug/trace left enabled, Razor template
-# injection, weak crypto/RNG choices) and csharp/razor/security (html-raw-json,
-# a Razor-specific XSS shape) round it out. No rules/custom/csharp/ addition
-# was needed for this pass -- revisit if a real corpus turns up a gap the
-# way MediChain did for Python's sql-string-formatting.yml.
+# nested audit/ subdirectory) carries genuine source -> sink coverage:
+# os-command-injection, csharp-sqli, ssrf, three xxe rules,
+# unsafe-path-combine (path traversal), ten separate insecure-deserialization
+# rules (BinaryFormatter, NetDataContract, LosFormatter, SoapFormatter,
+# JavaScriptSerializer, Json.NET TypeNameHandling and others), ldap-injection
+# and xpath-injection, mass-assignment and missing-or-broken-authorization.
+# csharp/dotnet/security (ASP.NET-specific: missing anti-forgery tokens,
+# debug/trace left enabled, Razor template injection, weak crypto/RNG
+# choices) and csharp/razor/security (html-raw-json, a Razor-specific XSS
+# shape) round it out.
 #
+# rules/custom/csharp/ added 2026-09-22 -- a NIST Juliet C# benchmark
+# (sast-web/eval/build_juliet_csharp_subset.py) measured *zero* candidates
+# from four of the seven taint-flow categories tested (OS command injection,
+# XSS, path traversal, XPath injection) despite the vendored rules above
+# nominally covering three of them. Each vendored rule's pattern shape was
+# narrower than it looked: os-command-injection requires Process.Start's
+# 2+-argument overload, never the single-string one; xpath-injection's
+# taint sink requires the query built *inline* at the call site rather than
+# in a local variable first; unsafe-path-combine requires Path.Combine as
+# the source and a File.Read*/Write* static call as the sink, missing plain
+# concatenation into a stream constructor entirely. No vendored rule covers
+# reflected XSS via HttpResponse.Write at all. The four new custom rules
+# fill exactly those measured gaps -- see each file's own docstring for the
+# specific shape and how it was measured.
 # csharp/lang/best-practice and csharp/lang/correctness are left out,
 # mirroring every other language's selection logic: only `security/`
 # directories are in scope, non-security correctness/best-practice rules

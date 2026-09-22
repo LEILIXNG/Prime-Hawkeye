@@ -251,7 +251,7 @@ def normalize(raw: dict, target: Path) -> list[dict]:
 
         candidates.append({
             "rule_id": result.get("check_id"),
-            "message": cpp_details.get("message", extra.get("message", "").strip()),
+            "message": cpp_details.get("message", (extra.get("message") or "").strip()),
             "severity": extra.get("severity"),
             "cwe": metadata.get("cwe"),
             "owasp": metadata.get("owasp"),
@@ -403,6 +403,15 @@ def dedup_copies(candidates: list[dict], target: Path) -> list[dict]:
 
 
 def parse_llm_json(raw_text: str) -> dict:
+    if raw_text is None:
+        # A provider can return an empty/filtered completion (seen with a
+        # newer, less-tested OpenAI-compatible endpoint) rather than
+        # unparseable text -- scanner/verify.py's call_llm already treats
+        # any JSONDecodeError here as one verifier_failed finding instead
+        # of aborting the whole scan; this folds "no content at all" into
+        # that same existing, intentional degrade path instead of raising
+        # an unhandled AttributeError that would abort it.
+        raise json.JSONDecodeError("empty response from provider", "", 0)
     text = raw_text.strip()
     if text.startswith("```"):
         text = text.strip("`")
