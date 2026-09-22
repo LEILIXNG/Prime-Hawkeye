@@ -1,0 +1,25 @@
+rules:
+  - id: CPP009
+    languages: [cpp]
+    severity: WARNING
+    message: "Potential memory-copy risk: verify that the source cannot exceed the destination buffer size."
+    metadata:
+      name: Potential unsafe strcpy
+      # Split out of CPP001 (2026): strcpy's overflow condition is cheaply
+      # provable by comparing dest/source declared capacities the same way
+      # CPP004 compares memcpy's length argument, so this gets its own
+      # bounds validator and static verification instead of asking the LLM
+      # a request-reachability question that doesn't apply to a fixed-size
+      # mismatch bug (see string-copy-bounds in cpp_validators.py).
+      description: Compares known destination and source capacities, retaining unknown cases for review.
+      confidence: MEDIUM
+      hawkeye_language: cpp
+      hawkeye_validator: [standard-function-call, string-copy-bounds]
+      hawkeye_verification: static
+      hawkeye_remediation: Use the destination capacity as the upper bound, or switch to a length-limited copy that cannot exceed it.
+      cwe: ["CWE-120: Buffer Copy without Checking Size of Input"]
+    patterns:
+      - pattern: $FUNC(...)
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: '^(?:::)?(?:std::)?strcpy$'

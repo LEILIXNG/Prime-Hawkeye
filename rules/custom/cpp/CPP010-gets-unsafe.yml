@@ -1,0 +1,23 @@
+rules:
+  - id: CPP010
+    languages: [cpp]
+    severity: ERROR
+    message: gets() reads unbounded input with no destination size limit and cannot be called safely.
+    metadata:
+      name: Use of gets()
+      # Split out of CPP001 (2026): unlike strcpy/strcat/sprintf, gets() has
+      # no length-limited form at all -- every call is the vulnerability,
+      # so this needs no bounds comparison and no request-reachability
+      # question either (see gets-always-unsafe in cpp_validators.py).
+      description: Detects calls to the deprecated, inherently unbounded gets().
+      confidence: HIGH
+      hawkeye_language: cpp
+      hawkeye_validator: [standard-function-call, gets-always-unsafe]
+      hawkeye_verification: static
+      hawkeye_remediation: Replace with fgets() (or an equivalent length-limited read) bounded to the destination's actual capacity.
+      cwe: ["CWE-120: Buffer Copy without Checking Size of Input"]
+    patterns:
+      - pattern: $FUNC(...)
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: '^(?:::)?(?:std::)?gets$'

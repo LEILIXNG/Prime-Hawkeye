@@ -38,16 +38,32 @@ def cpp_candidate_details(result: dict, target: Path) -> dict:
     validators = (result.get("extra", {}).get("metadata", {})
                   .get("hawkeye_validator"))
     names = validators if isinstance(validators, list) else [validators]
-    if "memcpy-bounds" not in names:
-        return {}
-    status, capacity, copied = _memcpy_bounds_status(result, target)
-    if status == "overflow":
+    if "memcpy-bounds" in names:
+        status, capacity, copied, func = _memcpy_bounds_status(result, target)
+        if status == "overflow":
+            return {
+                "message": f"{func} length {copied} exceeds destination capacity {capacity}.",
+                "rule_confidence": "HIGH",
+                "static_analysis": "definite-overflow",
+            }
+        return {"static_analysis": "bounds-unknown"} if status == "unknown" else {}
+    if "string-copy-bounds" in names:
+        status, dest_capacity, src_capacity = _string_copy_bounds_status(result, target)
+        if status == "overflow":
+            return {
+                "message": (f"strcpy source (up to {src_capacity} bytes) exceeds "
+                            f"destination capacity {dest_capacity}."),
+                "rule_confidence": "HIGH",
+                "static_analysis": "definite-overflow",
+            }
+        return {"static_analysis": "bounds-unknown"} if status == "unknown" else {}
+    if "gets-always-unsafe" in names:
         return {
-            "message": f"memcpy length {copied} exceeds destination capacity {capacity}.",
+            "message": "gets() reads unbounded input with no destination size limit.",
             "rule_confidence": "HIGH",
             "static_analysis": "definite-overflow",
         }
-    return {"static_analysis": "bounds-unknown"} if status == "unknown" else {}
+    return {}
 
 
 def _result_path(result: dict, target: Path) -> Path:
@@ -130,30 +146,76 @@ def _new_delete_mismatch(result: dict, target: Path) -> bool:
     return allocation_array != delete_array
 
 
+
+# memcpy/memmove/strncpy all take (destination, source, length) and share the
+# exact overflow condition -- length compared against destination's declared
+# capacity -- so one bounds check covers all three (see build_juliet_subset.py's
+# 2026 measurement: Juliet's memmove/strncpy variants were previously invisible
+# to this rule entirely since only "memcpy" was matched).
+_BOUNDED_COPY_FUNCS = ("memcpy", "memmove", "strncpy")
+
+
 @validator("memcpy-bounds")
 def _memcpy_bounds(result: dict, target: Path) -> bool:
-    """Drop a memcpy only when its constant length is proven to fit."""
-    status, _capacity, _copied = _memcpy_bounds_status(result, target)
+    """Drop a bounded copy only when its constant length is proven to fit."""
+    status, _capacity, _copied, _func = _memcpy_bounds_status(result, target)
     return status != "safe"
 
 
-def _memcpy_bounds_status(result: dict, target: Path) -> tuple[str, int | None, int | None]:
+def _memcpy_bounds_status(result: dict, target: Path) -> tuple[str, int | None, int | None, str | None]:
+    loaded = _load_match(result, target)
+    if loaded is None:
+        return "invalid", None, None, None
+    source, matched, start = loaded
+    func = next((f for f in _BOUNDED_COPY_FUNCS
+                 if re.search(rf"(?:\b|::){f}\s*\(", matched)), None)
+    if func is None:
+        return "unknown", None, None, None
+    call = _call_arguments(matched, func)
+    if call is None or len(call) < 3:
+        return "unknown", None, None, func
+    destination, length = call[0], call[2]
+    if re.fullmatch(r"sizeof\s*\(\s*" + re.escape(destination.strip()) + r"\s*\)"
+                    r"(?:\s*-\s*\d+)?", length.strip()):
+        return "safe", None, None, func
+    capacity = _buffer_capacity(source[:start], destination)
+    copied = _integer(length)
+    if capacity is None or copied is None:
+        return "unknown", capacity, copied, func
+    return ("overflow" if copied > capacity else "safe"), capacity, copied, func
+
+
+@validator("string-copy-bounds")
+def _string_copy_bounds(result: dict, target: Path) -> bool:
+    """Drop an strcpy only when the source is provably no larger than the
+    destination. Reuses _buffer_capacity on both arguments -- it already
+    recognizes any declared fixed-size char array, dest or source alike."""
+    status, _dest, _src = _string_copy_bounds_status(result, target)
+    return status != "safe"
+
+
+def _string_copy_bounds_status(result: dict, target: Path) -> tuple[str, int | None, int | None]:
     loaded = _load_match(result, target)
     if loaded is None:
         return "invalid", None, None
     source, matched, start = loaded
-    call = _call_arguments(matched, "memcpy")
-    if call is None or len(call) < 3:
+    call = _call_arguments(matched, "strcpy")
+    if call is None or len(call) < 2:
         return "unknown", None, None
-    destination, length = call[0], call[2]
-    if re.fullmatch(r"sizeof\s*\(\s*" + re.escape(destination.strip()) + r"\s*\)"
-                    r"(?:\s*-\s*\d+)?", length.strip()):
-        return "safe", None, None
-    capacity = _buffer_capacity(source[:start], destination)
-    copied = _integer(length)
-    if capacity is None or copied is None:
-        return "unknown", capacity, copied
-    return ("overflow" if copied > capacity else "safe"), capacity, copied
+    destination, src = call[0], call[1]
+    before = source[:start]
+    dest_capacity = _buffer_capacity(before, destination)
+    src_capacity = _buffer_capacity(before, src)
+    if dest_capacity is None or src_capacity is None:
+        return "unknown", dest_capacity, src_capacity
+    return ("overflow" if src_capacity > dest_capacity else "safe"), dest_capacity, src_capacity
+
+
+@validator("gets-always-unsafe")
+def _gets_always_unsafe(result: dict, target: Path) -> bool:
+    """gets() has no length-limited form -- every call is the vulnerability,
+    unlike the other CPP rules there is no "proven safe" case to drop."""
+    return True
 
 
 @validator("null-dereference")

@@ -5,7 +5,15 @@ rules:
     message: Dangerous C string function can write past the destination buffer.
     metadata:
       name: Dangerous C string function
-      description: Detects calls to strcpy, strcat, sprintf, and gets.
+      # strcpy moved to CPP009 (its own bounds check) and gets to CPP010
+      # (always unsafe, no bounded form) -- both get hawkeye_verification:
+      # static now, which this rule can't do while it still also matches
+      # strcat/sprintf, whose overflow condition isn't cheaply provable the
+      # same way (strcat needs the existing dest content length too;
+      # sprintf needs format-string analysis) and still needs the
+      # request-reachability question this rule's default (dataflow)
+      # verification asks.
+      description: Detects calls to strcat and sprintf.
       confidence: HIGH
       hawkeye_language: cpp
       hawkeye_validator: standard-function-call
@@ -14,4 +22,4 @@ rules:
       - pattern: $FUNC(...)
       - metavariable-regex:
           metavariable: $FUNC
-          regex: '^(?:(?:::)?(?:std::)?)?(?:strcpy|strcat|sprintf|gets)$'
+          regex: '^(?:(?:::)?(?:std::)?)?(?:strcat|sprintf)$'

@@ -2,10 +2,13 @@ rules:
   - id: CPP004
     languages: [cpp]
     severity: WARNING
-    message: "Potential memory-copy risk: verify that the memcpy length does not exceed the destination buffer size."
+    message: "Potential memory-copy risk: verify that the copy length does not exceed the destination buffer size."
     metadata:
-      name: Potential unsafe memory copy
-      description: Compares known destination capacities and copy lengths, retaining unknown cases for review.
+      name: Potential unsafe bounded copy
+      # memmove and strncpy take the same (destination, source, length) shape
+      # as memcpy and share the identical overflow condition, so one bounds
+      # check (_memcpy_bounds_status in cpp_validators.py) covers all three.
+      description: Detects calls to memcpy, memmove, and strncpy; compares known destination capacities and copy lengths, retaining unknown cases for review.
       confidence: MEDIUM
       hawkeye_language: cpp
       hawkeye_validator: [standard-function-call, memcpy-bounds]
@@ -16,4 +19,4 @@ rules:
       - pattern: $FUNC(...)
       - metavariable-regex:
           metavariable: $FUNC
-          regex: '^(?:::)?(?:std::)?memcpy$'
+          regex: '^(?:::)?(?:std::)?(?:memcpy|memmove|strncpy)$'
