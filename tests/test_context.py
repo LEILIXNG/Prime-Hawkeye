@@ -395,6 +395,68 @@ class TestCalleeContext:
         assert "also-unrelated-marker" not in block
 
 
+class TestPathCode:
+    """The methods between entry point and sink, shown as code rather than
+    names: on HA_Benchmark the verifier answered `uncertain` for 93 of 276
+    real vulnerabilities because it could not see whether those methods
+    sanitised the value -- which is exactly where the sanitizers were."""
+
+    FILES = {
+        "p/Ctl.java": """package p;
+            class Ctl {
+                private final Svc svc;
+                @GetMapping("/x")
+                public void handle(String v) { svc.check(v); }
+            }""",
+        "p/Svc.java": """package p;
+            class Svc {
+                private final Dao dao;
+                void check(String v) {
+                    if (!v.matches("[a-z]+")) throw new IllegalArgumentException();  // sanitizer-marker
+                    dao.run(v);
+                }
+            }""",
+        "p/Dao.java": """package p;
+            class Dao { void run(String v) { exec(v); } }""",
+    }
+
+    def context_for(self, tmp_path, files, file, line):
+        root = workspace(tmp_path, files)
+        candidate = {"sink_file": file, "sink_line": line, "source_file": file, "source_line": line}
+        return build_caller_context(root, candidate, index_workspace(root))
+
+    def test_an_intermediate_methods_validation_is_shown(self, tmp_path):
+        text = self.context_for(tmp_path, self.FILES, "p/Dao.java", 2)
+        assert "Code along the first path" in text
+        assert "sanitizer-marker" in text
+        assert text.index("handle() in p/Ctl.java") < text.index("check() in p/Svc.java")
+
+    def test_a_long_method_keeps_its_signature_and_the_lines_before_the_call(self, tmp_path):
+        filler = "\n".join(f"                    int pad{i} = {i};" for i in range(60))
+        files = dict(self.FILES)
+        files["p/Svc.java"] = f"""package p;
+            class Svc {{
+                private final Dao dao;
+                void check(String v) {{
+{filler}
+                    if (!v.matches("[a-z]+")) throw new IllegalArgumentException();  // sanitizer-marker
+                    dao.run(v);
+                }}
+            }}"""
+        text = self.context_for(tmp_path, files, "p/Dao.java", 2)
+        block = text.split("check() in p/Svc.java")[1].split("\n-- ")[0]
+        assert "void check(String v)" in block and "sanitizer-marker" in block
+        assert "pad0 = 0" not in block
+
+    def test_a_sink_inside_the_handler_adds_nothing(self, tmp_path):
+        text = self.context_for(tmp_path, {"p/Ctl.java": """package p;
+            class Ctl {
+                @GetMapping("/x")
+                public void handle(String v) { exec(v); }
+            }"""}, "p/Ctl.java", 4)
+        assert "Code along the first path" not in text
+
+
 class TestNoEntryPointExplanation:
     """The one sentence this replaced described three different situations at
     once and read as a shrug, which is where most of the corpus's `uncertain`

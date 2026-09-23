@@ -241,16 +241,57 @@ def build_caller_context(target: Path, candidate: dict, index) -> str:
         return "### Call path\nThe sink sits directly inside a request handler."
 
     blocks = ["### Call paths from request entry points to this sink"]
-    for chain in chains[:MAX_CALLER_CHAINS]:
+    for i, chain in enumerate(chains[:MAX_CALLER_CHAINS]):
         hops = " <- ".join(f"{c.caller.name}() at {c.file}:{c.line}" for c in chain)
         entry = chain[-1].caller
         blocks.append(
             f"\n{hops}\nEntry point: {entry.name}() in {entry.file}, reached via {entry.entry_reason}\n"
             + read_window(target, entry.file, entry.start_line, CALLER_WINDOW)
         )
+        if i == 0 and len(chain) > 1:
+            blocks.append(_path_code(target, chain))
     if len(chains) > MAX_CALLER_CHAINS:
         blocks.append(f"\n(+{len(chains) - MAX_CALLER_CHAINS} more call paths not shown)")
     return "\n".join(blocks)
+
+
+# Budget for the code of the methods in between entry point and sink, on the
+# shortest chain only. Without it the verifier sees those methods as bare
+# names, and on long chains it says so and stops: measured on HA_Benchmark
+# (real chains median 11 frames), 93 of 276 vulnerable cases came back
+# `uncertain`, nearly every reasoning some form of "the intermediate
+# functions' code is not provided, cannot confirm whether the input is
+# sanitized" -- and those same methods are where the benchmark's sanitizers
+# live. Split evenly across the hops, clamped so a short chain shows whole
+# methods and a very long one still shows each call site.
+PATH_CODE_BUDGET = 240
+PATH_HOP_MIN_LINES = 10
+PATH_HOP_MAX_LINES = 40
+PATH_HOP_BELOW_CALL = 2
+
+
+def _path_code(target: Path, chain) -> str:
+    """The code of each method along one chain, entry point first, each cut
+    to what matters for "was it cleaned on the way": the whole method when it
+    fits, else its signature plus the lines leading up to the call onward --
+    validation is written before the call it guards."""
+    per_hop = max(PATH_HOP_MIN_LINES, min(PATH_HOP_MAX_LINES, PATH_CODE_BUDGET // len(chain)))
+    parts = ["\nCode along the first path, entry point first (each method trimmed to the lines before its call onward):"]
+    for call in reversed(chain):
+        method = call.caller
+        lines = _source_lines(target, call.file)
+        if lines is None:
+            continue
+        header = f"\n-- {method.name}() in {call.file}, calls onward at line {call.line}"
+        if method.end_line - method.start_line + 1 <= per_hop:
+            parts.append(header + "\n" + _numbered(lines, method.start_line, method.end_line))
+            continue
+        start = max(method.start_line + 1, call.line - (per_hop - 1 - PATH_HOP_BELOW_CALL))
+        end = min(method.end_line, call.line + PATH_HOP_BELOW_CALL)
+        signature = _numbered(lines, method.start_line, method.start_line)
+        gap = "\n      | ...\n" if start > method.start_line + 1 else "\n"
+        parts.append(header + "\n" + signature + gap + _numbered(lines, start, end))
+    return "\n".join(parts)
 
 
 MAX_CALLEE_BODIES = 3
