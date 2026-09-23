@@ -35,7 +35,7 @@ from scanner.translate import (
     parse_translation,
     validate_translation,
 )
-from llm_gateway.rate_limit import RateLimitExhausted
+from llm_gateway.rate_limit import ProviderExhausted
 from scanner.verify import call_llm, call_llm_cached
 
 DEFAULT_CONFIGS = load_default_configs()
@@ -106,9 +106,10 @@ def verify_all(candidates, workspace_dir, index, template, provider, model, conc
     the first exception, which keeps the contract that a hard failure ends
     the stage rather than yielding a report with silent holes in it.
 
-    A rate limit is the one failure that does not end it. llm_gateway
-    retries a 429 with backoff, and only when those are exhausted does one
-    reach here; at that point the endpoint is refusing us for longer than a
+    A rate limit or a transient provider failure (connection error, timeout,
+    5xx) is the one failure that does not end it. llm_gateway retries those
+    with backoff, and only when they are exhausted does one reach here as
+    ProviderExhausted; at that point the endpoint is refusing us for longer than a
     scan can wait, and the answer is to keep what was judged rather than
     throw the whole scan away. Verification stops at that candidate, the
     rest come back as the bare candidate with no `finding` key at all --
@@ -159,7 +160,7 @@ def verify_all(candidates, workspace_dir, index, template, provider, model, conc
         prompt = build_prompt(template, candidate, code_context)
         try:
             return {**candidate, "finding": call_llm(provider, model, prompt)}
-        except RateLimitExhausted as e:
+        except ProviderExhausted as e:
             if not halted:
                 halted.append(str(e))
                 print(f"[pipeline] {e}; keeping the findings verified so far", file=sys.stderr)

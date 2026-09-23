@@ -23,18 +23,56 @@ BASE_DELAY_SECONDS = 2.0
 MAX_DELAY_SECONDS = 30.0
 
 
-class RateLimitExhausted(Exception):
-    """Every attempt at one call came back rate-limited.
+class ProviderExhausted(Exception):
+    """Every attempt at one call failed in a way retrying was meant to cure.
 
     Distinct from the provider's own error so callers above the gateway can
-    tell "the endpoint is throttling us" from "the request was malformed",
-    and treat only the first as something a scan can carry on past.
+    tell "the endpoint is not answering us right now" from "the request was
+    malformed", and treat only the first as something a scan can carry on
+    past (scanner/pipeline.py keeps what was already verified).
     """
 
-    def __init__(self, attempts: int, last_error: BaseException):
-        super().__init__(f"rate limited by the provider after {attempts} attempts: {last_error}")
+    def __init__(self, message: str, attempts: int, last_error: BaseException):
+        super().__init__(message)
         self.attempts = attempts
         self.last_error = last_error
+
+
+class RateLimitExhausted(ProviderExhausted):
+    """Every attempt came back rate-limited (429)."""
+
+    def __init__(self, attempts: int, last_error: BaseException):
+        super().__init__(f"rate limited by the provider after {attempts} attempts: {last_error}",
+                         attempts, last_error)
+
+
+class ProviderUnavailable(ProviderExhausted):
+    """Every attempt failed to connect, timed out, or got a 5xx."""
+
+    def __init__(self, attempts: int, last_error: BaseException):
+        super().__init__(f"provider unreachable after {attempts} attempts: {last_error}",
+                         attempts, last_error)
+
+
+# A dropped connection or a gateway 5xx is as transient as a 429, and it was
+# ending whole scans the same way: measured on HA_Benchmark (384 candidates),
+# two full runs in a row failed outright at 65/384 and 129/384 on a single
+# "Connection error." while the endpoint answered fine seconds later. The
+# openai SDK's own two quick retries do not outlast that.
+TRANSIENT_ERROR_NAMES = frozenset({
+    "APIConnectionError", "APITimeoutError", "InternalServerError",
+    "ConnectError", "ConnectTimeout", "ReadTimeout", "ReadError", "RemoteProtocolError",
+})
+TRANSIENT_STATUS_CODES = frozenset({500, 502, 503, 504, 529})
+
+
+def is_transient(error: BaseException) -> bool:
+    if type(error).__name__ in TRANSIENT_ERROR_NAMES:
+        return True
+    status = getattr(error, "status_code", None)
+    if status is None:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+    return status in TRANSIENT_STATUS_CODES
 
 
 def is_rate_limited(error: BaseException) -> bool:
@@ -83,10 +121,11 @@ def delay_before(attempt: int, error: BaseException) -> float:
 
 
 def call_with_retry(send, attempts: int = MAX_ATTEMPTS, sleep=None):
-    """Call `send()`, retrying with backoff while the provider answers 429.
+    """Call `send()`, retrying with backoff while the provider answers 429,
+    or fails transiently (is_transient: connection error, timeout, 5xx).
 
-    Anything that is not a rate limit is re-raised untouched on the first
-    try -- a malformed request does not get better by being sent again.
+    Anything else is re-raised untouched on the first try -- a malformed
+    request does not get better by being sent again.
     `sleep` is injected so tests can assert the backoff without spending it;
     resolved here rather than as a default argument, which would bind
     time.sleep at import and quietly ignore a patched one.
@@ -96,11 +135,12 @@ def call_with_retry(send, attempts: int = MAX_ATTEMPTS, sleep=None):
         try:
             return send()
         except Exception as e:
-            if not is_rate_limited(e):
+            limited = is_rate_limited(e)
+            if not limited and not is_transient(e):
                 raise
             if attempt == attempts:
-                raise RateLimitExhausted(attempts, e) from e
+                raise (RateLimitExhausted if limited else ProviderUnavailable)(attempts, e) from e
             wait = delay_before(attempt + 1, e)
-            print(f"[llm] rate limited, retrying in {wait:.0f}s "
-                  f"(attempt {attempt + 1}/{attempts})", file=sys.stderr)
+            print(f"[llm] {'rate limited' if limited else f'transient error ({type(e).__name__})'}, "
+                  f"retrying in {wait:.0f}s (attempt {attempt + 1}/{attempts})", file=sys.stderr)
             sleep(wait)

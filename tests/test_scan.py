@@ -392,8 +392,8 @@ class TestVerifyAllRateLimited:
     already paid for is the worse of the two options.
     """
 
-    def _setup(self, monkeypatch, fail_from: int):
-        from llm_gateway.rate_limit import RateLimitExhausted
+    def _setup(self, monkeypatch, fail_from: int, unavailable: bool = False):
+        from llm_gateway.rate_limit import ProviderUnavailable, RateLimitExhausted
         from scanner import pipeline
 
         monkeypatch.setattr(pipeline, "build_context", lambda ws, c, idx: "ctx")
@@ -403,16 +403,19 @@ class TestVerifyAllRateLimited:
         def call_llm(provider, model, prompt):
             sent.append(prompt)
             if int(prompt[1]) >= fail_from:
+                if unavailable:
+                    raise ProviderUnavailable(4, RuntimeError("Connection error."))
                 raise RateLimitExhausted(4, RuntimeError("429 Too Many Requests"))
             return {"reachable": "yes", "reasoning": "ok"}
 
         monkeypatch.setattr(pipeline, "call_llm", call_llm)
         return sent
 
-    def test_the_verdicts_already_paid_for_are_kept(self, monkeypatch):
+    @pytest.mark.parametrize("unavailable", [False, True], ids=["rate-limited", "connection-lost"])
+    def test_the_verdicts_already_paid_for_are_kept(self, monkeypatch, unavailable):
         from scanner.pipeline import verify_all
 
-        self._setup(monkeypatch, fail_from=3)
+        self._setup(monkeypatch, fail_from=3, unavailable=unavailable)
         candidates = [{"sink_file": f"F{n}.java"} for n in range(6)]
 
         verified = verify_all(candidates, None, None, "tpl", None, "m", concurrency=1)

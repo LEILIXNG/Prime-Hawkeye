@@ -8,10 +8,13 @@ import pytest
 
 from llm_gateway.rate_limit import (
     MAX_ATTEMPTS,
+    ProviderExhausted,
+    ProviderUnavailable,
     RateLimitExhausted,
     call_with_retry,
     delay_before,
     is_rate_limited,
+    is_transient,
 )
 
 
@@ -127,6 +130,51 @@ class TestCallWithRetry:
             call_with_retry(send, sleep=slept.append)
 
         assert slept == []
+
+
+class APIConnectionError(Exception):
+    """Named like openai.APIConnectionError, which is what a dropped
+    connection surfaces as ("Connection error.")."""
+
+
+class TestTransientFailures:
+    """A dropped connection ended two full HA_Benchmark runs in a row, at
+    65/384 and 129/384, while the endpoint answered fine seconds later."""
+
+    def test_connection_errors_timeouts_and_5xx_are_transient(self):
+        assert is_transient(APIConnectionError("Connection error."))
+        error = RuntimeError("bad gateway")
+        error.status_code = 502
+        assert is_transient(error)
+        assert not is_transient(ValueError("model not found"))
+        assert not is_transient(SdkRateLimitError())
+
+    def test_a_dropped_connection_is_retried(self):
+        slept, attempts = [], []
+
+        def send():
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise APIConnectionError("Connection error.")
+            return "verdict"
+
+        assert call_with_retry(send, sleep=slept.append) == "verdict"
+        assert len(slept) == 2
+
+    def test_an_exhausted_transient_failure_is_a_provider_exhausted(self):
+        """So the pipeline keeps what was verified instead of failing the scan."""
+        def send():
+            raise APIConnectionError("Connection error.")
+
+        with pytest.raises(ProviderUnavailable) as excinfo:
+            call_with_retry(send, sleep=lambda s: None)
+        assert isinstance(excinfo.value, ProviderExhausted)
+        assert excinfo.value.attempts == MAX_ATTEMPTS
+
+    def test_rate_limit_exhaustion_is_still_its_own_type(self):
+        with pytest.raises(RateLimitExhausted) as excinfo:
+            call_with_retry(lambda: (_ for _ in ()).throw(SdkRateLimitError()), sleep=lambda s: None)
+        assert isinstance(excinfo.value, ProviderExhausted)
 
 
 class TestProviderIntegration:
