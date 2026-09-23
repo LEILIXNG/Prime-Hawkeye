@@ -9,7 +9,7 @@ traces through a mapper without knowing XML exists.
 from pathlib import Path
 from xml.parsers import expat
 
-from scanner.callgraph.model import ANY_ARITY, Index, Method
+from scanner.callgraph.model import ANY_ARITY, Index, Method, Owner
 
 
 # MyBatis statement tags that a mapper interface method maps onto. <sql> is
@@ -102,4 +102,9 @@ def index_mybatis_mappers(root: Path, index: Index) -> None:
                 arity=arities.pop() if len(arities) == 1 else ANY_ARITY,
                 start_line=start_line,
                 end_line=end_line,
+                # The namespace *is* the mapper interface's qualified name,
+                # so a call on a typed mapper field reaches only its own XML.
+                # The bare name stays empty: the older checks read an empty
+                # owner as "unknown, keep the edge", which is still true here.
+                owner=Owner(qualified=namespace),
             ))

@@ -664,9 +664,11 @@ class TestSelfReceiverCalls:
         chains = trace_to_entry_points(idx, "Leaf.java", 3)
         assert chains and chains[0][-1].caller.name == "handler"
 
-    def test_an_unnamed_owner_keeps_the_edge(self, tmp_path):
-        """Dropping an edge is only allowed when it is provably wrong. A
-        statement in a mapper XML has no owner type at all."""
+    def test_this_call_does_not_reach_an_unrelated_mappers_statement(self, tmp_path):
+        """A mapper statement used to have no owner type at all, so this edge
+        was kept as unprovable. Its namespace *is* the owner's qualified name,
+        though, and Svc is not com.x.M: on HA_Benchmark every class's
+        `this.enrich(v)` reached every <select id="enrich"> in the project."""
         idx = index_workspace(workspace(tmp_path, {
             "mapper/M.xml": '<mapper namespace="com.x.M"><select id="q">select ${a}</select></mapper>',
             "Svc.java": """
@@ -676,7 +678,116 @@ class TestSelfReceiverCalls:
                 }
             """,
         }))
-        assert trace_to_entry_points(idx, "mapper/M.xml", 1)
+        assert trace_to_entry_points(idx, "mapper/M.xml", 1) == []
+
+    def test_a_typed_mapper_field_reaches_its_own_statement(self, tmp_path):
+        idx = index_workspace(workspace(tmp_path, {
+            "mapper/M.xml": '<mapper namespace="com.x.M"><select id="q">select ${a}</select></mapper>',
+            "com/x/M.java": "package com.x;\ninterface M { String q(String a); }",
+            "com/x/Svc.java": """package com.x;
+                class Svc {
+                    private final M mapper;
+                    @PostMapping("/x")
+                    public void handler(String a) { mapper.q(a); }
+                }
+            """,
+        }))
+        chains = trace_to_entry_points(idx, "mapper/M.xml", 1)
+        assert chains and chains[0][-1].caller.name == "handler"
+
+
+class TestJavaReceiverTypes:
+    """Receiver types resolved through package and imports (java_types.py).
+    The measured failure: on HA_Benchmark, name + arity matching made every
+    sink reachable from every one of 412 request handlers, and the four
+    chains shown to the verifier held the real entry point for 1 case."""
+
+    TWO_PACKAGES = {
+        "a/Exec.java": "package a;\nclass Exec { void refine(String v) { exec(v); } }",
+        "a/Ctl.java": """package a;
+            class Ctl {
+                private final Exec executor;
+                @GetMapping("/a")
+                public void handle(String v) { executor.refine(v); }
+            }""",
+        "b/Exec.java": "package b;\nclass Exec { void refine(String v) { exec(v); } }",
+        "b/Ctl.java": """package b;
+            class Ctl {
+                private final Exec executor;
+                @GetMapping("/b")
+                public void handle(String v) { executor.refine(v); }
+            }""",
+    }
+
+    def test_same_named_classes_in_other_packages_do_not_connect(self, tmp_path):
+        idx = index_workspace(workspace(tmp_path, self.TWO_PACKAGES))
+        chains = trace_to_entry_points(idx, "a/Exec.java", 2)
+        assert [c[-1].caller.file for c in chains] == ["a/Ctl.java"]
+
+    def test_an_import_resolves_across_packages(self, tmp_path):
+        idx = index_workspace(workspace(tmp_path, {
+            "dao/Exec.java": "package dao;\npublic class Exec { public void refine(String v) { exec(v); } }",
+            "other/Exec.java": "package other;\npublic class Exec { public void refine(String v) { exec(v); } }",
+            "web/Ctl.java": """package web;
+                import dao.Exec;
+                class Ctl {
+                    @GetMapping("/x")
+                    public void handle(String v) { new Exec().refine(v); }
+                }""",
+        }))
+        assert trace_to_entry_points(idx, "dao/Exec.java", 2)
+        assert trace_to_entry_points(idx, "other/Exec.java", 2) == []
+
+    def test_a_call_on_an_interface_reaches_its_implementation(self, tmp_path):
+        idx = index_workspace(workspace(tmp_path, {
+            "p/Plan.java": "package p;\ninterface Plan { void run(String v); }",
+            "p/PlanImpl.java": "package p;\nclass PlanImpl implements Plan { public void run(String v) { exec(v); } }",
+            "p/Ctl.java": """package p;
+                class Ctl {
+                    @GetMapping("/x")
+                    public void handle(Plan plan, String v) { plan.run(v); }
+                }""",
+        }))
+        chains = trace_to_entry_points(idx, "p/PlanImpl.java", 2)
+        assert chains and chains[0][-1].caller.name == "handle"
+
+    def test_a_library_receiver_reaches_no_workspace_method(self, tmp_path):
+        """`buffer.append(v)` on a StringBuilder used to be an edge into every
+        workspace method named append/1."""
+        idx = index_workspace(workspace(tmp_path, {
+            "p/Log.java": "package p;\nclass Log { void append(String v) { exec(v); } }",
+            "p/Ctl.java": """package p;
+                class Ctl {
+                    @GetMapping("/x")
+                    public void handle(String v) { StringBuilder buffer = new StringBuilder(); buffer.append(v); }
+                }""",
+        }))
+        assert trace_to_entry_points(idx, "p/Log.java", 2) == []
+
+    def test_a_static_call_names_its_class(self, tmp_path):
+        idx = index_workspace(workspace(tmp_path, {
+            "p/Util.java": "package p;\nclass Util { static void run(String v) { exec(v); } }",
+            "q/Util.java": "package q;\nclass Util { static void run(String v) { exec(v); } }",
+            "p/Ctl.java": """package p;
+                class Ctl {
+                    @GetMapping("/x")
+                    public void handle(String v) { Util.run(v); }
+                }""",
+        }))
+        assert trace_to_entry_points(idx, "p/Util.java", 2)
+        assert trace_to_entry_points(idx, "q/Util.java", 2) == []
+
+    def test_an_unknown_receiver_keeps_the_name_match(self, tmp_path):
+        """A call result's type is not read; the old edge stays."""
+        idx = index_workspace(workspace(tmp_path, {
+            "p/Exec.java": "package p;\nclass Exec { void refine(String v) { exec(v); } }",
+            "p/Ctl.java": """package p;
+                class Ctl {
+                    @GetMapping("/x")
+                    public void handle(String v) { lookup().refine(v); }
+                }""",
+        }))
+        assert trace_to_entry_points(idx, "p/Exec.java", 2)
 
 
 class TestPackageSurface:

@@ -23,7 +23,16 @@ ANY_ARITY = -1
 # not a round number: the last chain it recovers is TemplateUtil.writeFile <-
 # ExportUtil x3 <- VulnerabilityService x3 <- an @PostMapping handler, checked
 # hop by hop against the source. The whole sweep costs 1.8s.
-MAX_DEPTH = 7
+#
+# Raised to 20 once Java calls carried receiver types (java_types.py). 7
+# only ever looked sufficient on deep code because name + arity matching
+# connected nearly everything within a few hops -- through the wrong
+# classes. HA_Benchmark's real chains run 2 to 19 hops (median 10); with
+# typed edges, depth 7 finds 114 of its 412 real entry points, 12 finds 284,
+# 20 finds all 412, and the whole 412-sink sweep still takes 6.6s. A chain
+# prints as one short line per hop (context.build_caller_context), so a
+# longer one costs the prompt little.
+MAX_DEPTH = 20
 
 
 @dataclass
@@ -41,6 +50,12 @@ class Owner:
     name: str = ""
     supertypes: tuple[str, ...] = ()
     anonymous: bool = False
+    # Package-qualified name (`com.northwind.accountposting.dao.TariffExecutor`),
+    # Java only for now; empty everywhere else. `name` stays the bare name
+    # because entry-point detection and Index.ancestors key on it. This is
+    # what tells apart the five TariffExecutor classes a real multi-module
+    # codebase can hold -- see traverse._java_call_can_reach.
+    qualified: str = ""
 
 
 @dataclass
@@ -94,6 +109,20 @@ class Call:
     # strings and never remove an edge.
     argument_types: tuple[str, ...] = ()
     argument_symbols: tuple[str, ...] = ()
+    # Java's receiver type, resolved through the file's package and imports.
+    # Three shapes: a package-qualified name of a workspace type; `?Name` for
+    # a type that is not in the workspace at all (StringBuilder, List), which
+    # can then reach no workspace method; `~Name` for a workspace type name
+    # the imports did not pin down, matched by bare name. Empty means the
+    # receiver's type could not be read (a call chain, a lambda parameter)
+    # and the edge falls back to name + arity. Kept apart from target_owner
+    # because that field's check compares bare names exactly, which would
+    # cut interface dispatch -- the call is on the interface, the method on
+    # the implementation.
+    target_qualified: str = ""
+    # Java call with no receiver at all (`helper(x)`): it lands in the
+    # caller's own class hierarchy, its enclosing classes, or a static import.
+    implicit_self: bool = False
 
 
 @dataclass
@@ -110,6 +139,12 @@ class Index:
     # "nothing calls this method" be followed by "but its name is a string
     # in OaEnum.java", which is the difference between a shrug and a lead.
     string_literals: dict[str, set[str]] = field(default_factory=dict)
+    # supertypes/ancestors again, keyed and valued by Owner.qualified
+    # (Java). Bare names cannot tell two same-named interfaces in different
+    # packages apart, and dispatch through the wrong one is exactly the
+    # cross-package edge the qualified names exist to remove.
+    qualified_supertypes: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    qualified_ancestors: dict[str, frozenset[str]] = field(default_factory=dict)
 
     def methods_named(self, name: str, arity: int) -> list[Method]:
         return [m for m in self.methods if m.name == name and m.arity == arity]

@@ -67,13 +67,64 @@ def _self_call_can_reach(index: Index, call: Call, method: Method) -> bool:
             or caller_owner.name in index.ancestors.get(target_owner.name, ()))
 
 
+def _qualified_related(index: Index, a: str, b: str) -> bool:
+    """Same type, or one is a supertype of the other: a call on an interface
+    lands on its implementations, and a call on a subclass lands on a method
+    it inherits."""
+    return (a == b or a in index.qualified_ancestors.get(b, ())
+            or b in index.qualified_ancestors.get(a, ()))
+
+
+def _java_call_can_reach(index: Index, call: Call, method: Method) -> bool:
+    """Whether a Java call site could be calling `method`, using the receiver
+    type index.py resolved. Only ever drops an edge whose types are known on
+    both sides and provably unrelated; anything unknown keeps the plain
+    name + arity edge.
+
+    Measured on HA_Benchmark (412 cases, one Maven project, many same-named
+    classes and methods across packages): with name + arity alone, 189
+    methods were named refine/1, a sink's method had 140 direct callers, and
+    every sink reached every one of the 412 request handlers. The four
+    shortest chains the context builder prints held the case's real entry
+    point for 1 case in 412, so the verify stage judged each candidate on
+    some other case's call chain -- and never saw the sanitizer on its own.
+    """
+    caller_owner = call.caller.owner
+    if call.receiver_is_self:
+        # _self_call_can_reach already ran on bare names, and lets an empty
+        # one through -- which a MyBatis statement's Owner always is, so
+        # `this.enrich(v)` in any class reached every <select id="enrich">.
+        if not caller_owner.qualified or not method.owner.qualified:
+            return True
+        return _qualified_related(index, caller_owner.qualified, method.owner.qualified)
+    if call.implicit_self:
+        if not caller_owner.qualified or not method.owner.qualified or method.file == call.file:
+            return True
+        return _qualified_related(index, caller_owner.qualified, method.owner.qualified)
+    target = call.target_qualified
+    if not target or not method.owner.qualified:
+        return True
+    if target.startswith("?"):
+        # A type the workspace does not declare. It can still be a
+        # workspace class's supertype (Runnable, HttpServlet), which
+        # index.py records under the same `?Name` spelling.
+        return target in index.qualified_ancestors.get(method.owner.qualified, ())
+    if target.startswith("~"):
+        name = target[1:]
+        return (not method.owner.name or method.owner.name == name
+                or name in index.ancestors.get(method.owner.name, ())
+                or method.owner.name in index.ancestors.get(name, ()))
+    return _qualified_related(index, target, method.owner.qualified)
+
+
 def callers_of(index: Index, method: Method) -> list[Call]:
     return [c for c in index.calls
             if c.callee == method.name
             and (method.arity == ANY_ARITY or c.arity == method.arity)
             and c.caller is not None
             and (not c.receiver_is_self or _self_call_can_reach(index, c, method))
-            and _typed_call_can_reach(c, method)]
+            and _typed_call_can_reach(c, method)
+            and _java_call_can_reach(index, c, method)]
 
 
 def trace_to_entry_points(index: Index, file: str, line: int, max_depth: int = MAX_DEPTH) -> list[list[Call]]:
